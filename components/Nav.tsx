@@ -4,12 +4,6 @@ import Link from 'next/link'
 import { useState } from 'react'
 
 const items = [
-  { href: '/', label: 'Dashboard', icon: '🏠' },
-  { href: '/students', label: 'Students', icon: '👥' },
-  { href: '/inventory', label: 'Inventory', icon: '📦' },
-  { href: '/expenses', label: 'Expenses', icon: '🧾' },
-  { href: '/extrabilling', label: 'Extra Billing', icon: '📄' },
-  { href: '/outstanding', label: 'Outstanding', icon: '⚠️' },
   { href: '/progress-report', label: 'Progress Report', icon: '📊' },
 ]
 
