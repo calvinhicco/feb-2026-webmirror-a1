@@ -100,15 +100,47 @@ export type StudentCandidate = {
 
 const normalizeName = (name: string) => String(name || '').trim().toLowerCase().replace(/\s+/g, ' ')
 
-export const findStudentCandidatesByName = async (studentName: string, maxScan = 200): Promise<StudentCandidate[]> => {
-  const target = normalizeName(studentName)
+export const findStudentCandidatesByName = async (studentName: string, maxScan = 2000): Promise<StudentCandidate[]> => {
+  const rawInput = String(studentName || '').trim()
+  const target = normalizeName(rawInput)
   if (!target) return []
 
-  const q = query(collection(db, 'progressReports'), orderBy('updatedAtIso', 'desc'), limit(maxScan))
-  const snap = await getDocs(q)
-
   const byId = new Map<string, StudentCandidate>()
-  snap.docs.forEach((d) => {
+
+  // 1) First try an exact Firestore equality match (fast path).
+  // Note: Firestore string equality is case-sensitive.
+  // This will work if the user types the name exactly as stored in progressReports.studentName.
+  try {
+    const exactQ = query(
+      collection(db, 'progressReports'),
+      where('studentName', '==', rawInput),
+      limit(25),
+    )
+    const exactSnap = await getDocs(exactQ)
+    exactSnap.docs.forEach((d) => {
+      const data = d.data() as any
+      const sid = typeof data?.studentId === 'string' ? data.studentId.trim() : ''
+      const sname = typeof data?.studentName === 'string' ? data.studentName.trim() : ''
+      if (!sid || !sname) return
+      if (byId.has(sid)) return
+      byId.set(sid, {
+        studentId: sid,
+        studentName: sname,
+        className: typeof data?.className === 'string' ? data.className : undefined,
+      })
+    })
+  } catch {
+    // ignore; we'll fallback to a broader scan
+  }
+
+  if (byId.size > 0) return Array.from(byId.values())
+
+  // 2) Fallback: scan most-recent reports and compare using normalized matching
+  // (handles case/whitespace differences).
+  const scanQ = query(collection(db, 'progressReports'), orderBy('updatedAtIso', 'desc'), limit(maxScan))
+  const scanSnap = await getDocs(scanQ)
+
+  scanSnap.docs.forEach((d) => {
     const data = d.data() as any
     const sid = typeof data?.studentId === 'string' ? data.studentId.trim() : ''
     const sname = typeof data?.studentName === 'string' ? data.studentName.trim() : ''
