@@ -5,7 +5,11 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import {
+  auth,
+  db,
+  findStudentCandidatesByName,
   getParentProfile,
+  linkStudentToParentProfile,
   loginParent,
   logoutParent,
   onAuthChange,
@@ -13,6 +17,7 @@ import {
   subscribeLatestProgressReportForStudent,
   type ParentProfile,
   type ProgressReportDoc,
+  type StudentCandidate,
 } from '@/lib/firebase'
 
 const safeTrim = (v: string) => String(v || '').trim()
@@ -45,13 +50,21 @@ export default function ProgressReportPage() {
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [studentId, setStudentId] = useState('')
+  const [studentName, setStudentName] = useState('')
   const [authError, setAuthError] = useState('')
   const [authBusy, setAuthBusy] = useState(false)
 
   const [profile, setProfile] = useState<ParentProfile | null>(null)
+  const [selectedStudentId, setSelectedStudentId] = useState<string>('')
   const [report, setReport] = useState<ProgressReportDoc | null>(null)
   const [loadingReport, setLoadingReport] = useState(false)
+
+  const [linkName, setLinkName] = useState('')
+  const [linkBusy, setLinkBusy] = useState(false)
+  const [linkError, setLinkError] = useState('')
+
+  const [candidates, setCandidates] = useState<StudentCandidate[]>([])
+  const [candidateBusy, setCandidateBusy] = useState(false)
 
   const reportRef = useRef<HTMLDivElement | null>(null)
   const [exportBusy, setExportBusy] = useState(false)
@@ -62,6 +75,8 @@ export default function ProgressReportPage() {
       if (!user) {
         setAuthUserEmail('')
         setProfile(null)
+        setSelectedStudentId('')
+        setCandidates([])
         setReport(null)
         return
       }
@@ -77,13 +92,21 @@ export default function ProgressReportPage() {
   }, [])
 
   useEffect(() => {
-    if (!profile?.studentId) {
+    const first = profile?.studentIds?.[0] || ''
+    setSelectedStudentId((prev) => {
+      if (prev && profile?.studentIds?.includes(prev)) return prev
+      return first
+    })
+  }, [profile?.studentIds])
+
+  useEffect(() => {
+    if (!selectedStudentId) {
       setReport(null)
       return
     }
 
     setLoadingReport(true)
-    const unsub = subscribeLatestProgressReportForStudent(profile.studentId, (doc) => {
+    const unsub = subscribeLatestProgressReportForStudent(selectedStudentId, (doc) => {
       setReport(doc)
       setLoadingReport(false)
     })
@@ -91,11 +114,11 @@ export default function ProgressReportPage() {
     return () => {
       if (unsub) unsub()
     }
-  }, [profile?.studentId])
+  }, [selectedStudentId])
 
   const canRegister = useMemo(() => {
-    return safeTrim(email) && safeTrim(password) && safeTrim(studentId)
-  }, [email, password, studentId])
+    return safeTrim(email) && safeTrim(password) && safeTrim(studentName)
+  }, [email, password, studentName])
 
   const canLogin = useMemo(() => {
     return safeTrim(email) && safeTrim(password)
@@ -104,11 +127,12 @@ export default function ProgressReportPage() {
   const handleAuth = async () => {
     setAuthError('')
     setAuthBusy(true)
+    setCandidates([])
 
     try {
       if (authMode === 'register') {
         if (!canRegister) {
-          setAuthError('Email, password, and student ID are required.')
+          setAuthError('Email, password, and student name are required.')
           return
         }
         if (!isLikelyEmail(email)) {
@@ -119,8 +143,27 @@ export default function ProgressReportPage() {
           setAuthError('Password must be at least 6 characters (Firebase requirement).')
           return
         }
-        await registerParent({ email: safeTrim(email), password: safeTrim(password), studentId: safeTrim(studentId) })
+
+        setCandidateBusy(true)
+        const found = await findStudentCandidatesByName(safeTrim(studentName))
+        setCandidateBusy(false)
+        setCandidates(found)
+
+        if (found.length === 0) {
+          setAuthError('No matching student found. Make sure a progress report has been synced for that student name.')
+          return
+        }
+
+        if (found.length > 1) {
+          setAuthError('Multiple students found with that name. Please select the correct student.')
+          return
+        }
+
+        const chosen = found[0]
+        await registerParent({ email: safeTrim(email), password: safeTrim(password), studentId: chosen.studentId })
         setPassword('')
+        setStudentName('')
+        setCandidates([])
         return
       }
 
@@ -175,8 +218,43 @@ export default function ProgressReportPage() {
     await logoutParent()
     setEmail('')
     setPassword('')
-    setStudentId('')
+    setStudentName('')
+    setLinkName('')
+    setLinkError('')
+    setCandidates([])
     setAuthMode('login')
+  }
+
+  const linkedStudentIds = useMemo(() => {
+    return Array.isArray(profile?.studentIds) ? profile!.studentIds : []
+  }, [profile?.studentIds])
+
+  const resolveAndLinkByName = async (name: string) => {
+    setLinkError('')
+    const user = auth.currentUser
+    if (!user) return
+
+    setLinkBusy(true)
+    try {
+      const found = await findStudentCandidatesByName(safeTrim(name))
+      if (found.length === 0) {
+        setLinkError('No matching student found. Make sure a progress report has been synced for that student name.')
+        return
+      }
+      if (found.length > 1) {
+        setLinkError('Multiple students found with that name. Please use a more specific name or confirm in the desktop app.')
+        return
+      }
+
+      const chosen = found[0]
+      await linkStudentToParentProfile(user.uid, chosen.studentId)
+      const updated = await getParentProfile(user.uid)
+      setProfile(updated)
+      setSelectedStudentId(chosen.studentId)
+      setLinkName('')
+    } finally {
+      setLinkBusy(false)
+    }
   }
 
   return (
@@ -198,7 +276,7 @@ export default function ProgressReportPage() {
           <CardHeader>
             <CardTitle>{authMode === 'login' ? 'Parent Login' : 'Parent Registration'}</CardTitle>
             <CardDescription>
-              Register once, then you will only see the latest progress report for the student ID you entered.
+              Register once, then link one or more children. You will only see the latest progress report for the children you linked.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -209,11 +287,41 @@ export default function ProgressReportPage() {
 
             {authMode === 'register' ? (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <Input value={studentId} onChange={(e) => setStudentId(e.target.value)} placeholder="Student ID" />
+                <Input value={studentName} onChange={(e) => setStudentName(e.target.value)} placeholder="Student Name" />
+              </div>
+            ) : null}
+
+            {authMode === 'register' && candidates.length > 1 ? (
+              <div className="space-y-2">
+                <div className="text-sm text-muted-foreground">Select student:</div>
+                <div className="space-y-2">
+                  {candidates.map((c) => (
+                    <button
+                      key={c.studentId}
+                      type="button"
+                      className="w-full text-left border rounded-md p-3 hover:bg-purple-50"
+                      onClick={async () => {
+                        setAuthBusy(true)
+                        try {
+                          await registerParent({ email: safeTrim(email), password: safeTrim(password), studentId: c.studentId })
+                          setPassword('')
+                          setStudentName('')
+                          setCandidates([])
+                        } finally {
+                          setAuthBusy(false)
+                        }
+                      }}
+                    >
+                      <div className="text-sm font-medium">{c.studentName}</div>
+                      <div className="text-xs text-muted-foreground">ID: {c.studentId}{c.className ? ` · ${c.className}` : ''}</div>
+                    </button>
+                  ))}
+                </div>
               </div>
             ) : null}
 
             {authError ? <div className="text-sm text-destructive">{authError}</div> : null}
+            {authMode === 'register' && candidateBusy ? <div className="text-sm text-muted-foreground">Searching student…</div> : null}
 
             <div className="flex items-center gap-3">
               <Button onClick={handleAuth} disabled={authBusy || (authMode === 'login' ? !canLogin : !canRegister)}>
@@ -234,25 +342,66 @@ export default function ProgressReportPage() {
         </Card>
       ) : null}
 
-      {authUserEmail && !profile?.studentId ? (
+      {authUserEmail && (!profile || linkedStudentIds.length === 0) ? (
         <Card>
           <CardHeader>
-            <CardTitle>Account Setup Incomplete</CardTitle>
+            <CardTitle>No Child Linked Yet</CardTitle>
             <CardDescription>
-              This account is logged in, but no student ID is attached. Please logout and register again.
+              This account is logged in, but no student is linked yet. Add your child by student name.
             </CardDescription>
           </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <Input value={linkName} onChange={(e) => setLinkName(e.target.value)} placeholder="Student Name" />
+              <Button onClick={() => resolveAndLinkByName(linkName)} disabled={linkBusy || !safeTrim(linkName)}>
+                Link Child
+              </Button>
+            </div>
+            {linkError ? <div className="text-sm text-destructive">{linkError}</div> : null}
+          </CardContent>
         </Card>
       ) : null}
 
-      {authUserEmail && profile?.studentId ? (
+      {authUserEmail && profile && linkedStudentIds.length > 0 ? (
         <>
           <div className="flex items-center justify-between">
-            <div className="text-sm text-muted-foreground">Student ID: {profile.studentId}</div>
+            <div className="text-sm text-muted-foreground">
+              <div>Linked Children: {linkedStudentIds.length}</div>
+              <div className="pt-2">
+                <label className="text-xs text-muted-foreground">Select Child</label>
+                <select
+                  className="ml-2 border rounded-md px-2 py-1 text-sm"
+                  value={selectedStudentId}
+                  onChange={(e) => setSelectedStudentId(e.target.value)}
+                >
+                  {linkedStudentIds.map((sid) => (
+                    <option key={sid} value={sid}>
+                      {sid}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
             <Button onClick={downloadJpg} disabled={!report || exportBusy}>
               Download JPG
             </Button>
           </div>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Link Another Child</CardTitle>
+              <CardDescription>Enter the student name exactly as in the progress report.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <Input value={linkName} onChange={(e) => setLinkName(e.target.value)} placeholder="Student Name" />
+                <Button onClick={() => resolveAndLinkByName(linkName)} disabled={linkBusy || !safeTrim(linkName)}>
+                  Link Child
+                </Button>
+              </div>
+              {linkError ? <div className="text-sm text-destructive">{linkError}</div> : null}
+            </CardContent>
+          </Card>
 
           {loadingReport ? (
             <Card>

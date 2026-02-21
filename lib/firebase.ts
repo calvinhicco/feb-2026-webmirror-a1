@@ -21,12 +21,12 @@ import {
 // Firebase configuration - matches the Electron app's Firebase project
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY || "AIzaSyBd20WWDh_uXn94JNUBbjenXJWmuVLf23U",
-  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN || "jan-2026-webmirror-a1.firebaseapp.com",
-  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || "jan-2026-webmirror-a1",
-  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || "jan-2026-webmirror-a1.firebasestorage.app",
-  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID || "1065081043628",
-  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID || "1:1065081043628:web:c688bc05d45bc78275fd09",
-  measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID || "G-PET9XDG19X",
+  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN || "feb-2026-webmirror-a1.firebaseapp.com",
+  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || "feb-2026-webmirror-a1",
+  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || "feb-2026-webmirror-a1.firebasestorage.app",
+  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID || "832639056155",
+  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID || "1:832639056155:web:757d7122c7714763487bbe",
+  measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID || "G-LHWKCD9RZ7",
 }
 
 // Initialize Firebase
@@ -45,7 +45,7 @@ export { db, auth }
 
 export type ParentProfile = {
   uid: string
-  studentId: string
+  studentIds: string[]
   createdAtIso: string
 }
 
@@ -60,9 +60,10 @@ export const loginParent = async (email: string, password: string) => {
 export const registerParent = async (config: { email: string; password: string; studentId: string }) => {
   const cred = await createUserWithEmailAndPassword(auth, config.email, config.password)
   const uid = cred.user.uid
+  const sid = String(config.studentId || '').trim()
   const profile: ParentProfile = {
     uid,
-    studentId: String(config.studentId || '').trim(),
+    studentIds: sid ? [sid] : [],
     createdAtIso: new Date().toISOString(),
   }
   await setDoc(doc(db, 'parentProfiles', uid), profile, { merge: true })
@@ -76,7 +77,70 @@ export const logoutParent = async () => {
 export const getParentProfile = async (uid: string): Promise<ParentProfile | null> => {
   const snap = await getDoc(doc(db, 'parentProfiles', uid))
   if (!snap.exists()) return null
-  return { ...(snap.data() as any), uid: snap.id } as ParentProfile
+  const raw = snap.data() as any
+  const studentIds = Array.isArray(raw?.studentIds)
+    ? raw.studentIds.filter((x: any) => typeof x === 'string' && String(x).trim())
+    : typeof raw?.studentId === 'string' && raw.studentId.trim()
+      ? [raw.studentId.trim()]
+      : []
+
+  return {
+    ...(raw || {}),
+    uid: snap.id,
+    studentIds,
+    createdAtIso: typeof raw?.createdAtIso === 'string' ? raw.createdAtIso : new Date().toISOString(),
+  } as ParentProfile
+}
+
+export type StudentCandidate = {
+  studentId: string
+  studentName: string
+  className?: string
+}
+
+const normalizeName = (name: string) => String(name || '').trim().toLowerCase().replace(/\s+/g, ' ')
+
+export const findStudentCandidatesByName = async (studentName: string, maxScan = 200): Promise<StudentCandidate[]> => {
+  const target = normalizeName(studentName)
+  if (!target) return []
+
+  const q = query(collection(db, 'progressReports'), orderBy('updatedAtIso', 'desc'), limit(maxScan))
+  const snap = await getDocs(q)
+
+  const byId = new Map<string, StudentCandidate>()
+  snap.docs.forEach((d) => {
+    const data = d.data() as any
+    const sid = typeof data?.studentId === 'string' ? data.studentId.trim() : ''
+    const sname = typeof data?.studentName === 'string' ? data.studentName.trim() : ''
+    if (!sid || !sname) return
+    if (normalizeName(sname) !== target) return
+    if (byId.has(sid)) return
+    byId.set(sid, {
+      studentId: sid,
+      studentName: sname,
+      className: typeof data?.className === 'string' ? data.className : undefined,
+    })
+  })
+
+  return Array.from(byId.values())
+}
+
+export const linkStudentToParentProfile = async (uid: string, studentId: string) => {
+  const sid = String(studentId || '').trim()
+  const parentUid = String(uid || '').trim()
+  if (!parentUid || !sid) return
+
+  const existing = await getParentProfile(parentUid)
+  const current = Array.isArray(existing?.studentIds) ? existing!.studentIds : []
+  const next = Array.from(new Set([...current, sid])).filter((x) => String(x || '').trim())
+
+  const toSave: ParentProfile = {
+    uid: parentUid,
+    studentIds: next,
+    createdAtIso: existing?.createdAtIso || new Date().toISOString(),
+  }
+
+  await setDoc(doc(db, 'parentProfiles', parentUid), toSave, { merge: true })
 }
 
 export type ProgressReportDoc = {
